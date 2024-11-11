@@ -1,6 +1,6 @@
 
 import os
-from flask import Flask
+from flask import Flask, jsonify
 from flask_smorest import Api
 from flask_jwt_extended import JWTManager
 from resources.item import blp as ItemBlueprint
@@ -8,6 +8,8 @@ from resources.store import blp as StoreBlueprint
 from resources.tag import blp as TagBlueprint
 from resources.user import blp as UserBlueprint
 from resources.check import blp as DatabaseCheck
+from blocklist import BLOCKLIST
+from flask_migrate import Migrate
 from db import db
 import models
 import secrets
@@ -27,6 +29,8 @@ def create_app(db_url=None):
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     db.init_app(app)
 
+    migrate = Migrate(app, db)
+
     # Debug mode setting
     app.config["DEBUG"] = True
 
@@ -36,10 +40,55 @@ def create_app(db_url=None):
     app.config["JWT_SECRET_KEY"] = "viltor"
     jwt = JWTManager(app)
 
-    with app.app_context():
-        print("Database URI:", app.config["SQLALCHEMY_DATABASE_URI"])  # Debugging line
-        db.create_all()
-        print("Database tables created")  # Confirm this line is reached
+    @jwt.token_in_blocklist_loader
+    def check_if_token_in_blocklist(jwt_header, jwt_payload):
+        return jwt_payload["jti"] in BLOCKLIST
+    
+    @jwt.revoked_token_loader
+    def revoked_token_callback(jwt_header, jwt_payload):
+        return (
+            jsonify({"description": "Token has been revoked",
+                     "error": "token revoked"})
+        )
+    
+    @jwt.needs_fresh_token_loader
+    def token_not_fresh_callback(jwt_header, jwt_payload):
+        return (
+            jsonify({
+                    "description": "The token is not fresh",
+                    "error": "fresh token required"}),
+                401
+        )
+
+
+    @jwt.additional_claims_loader
+    def add_claims_to_jwt(identity):
+        # Look in the database and see wether the user is an admin
+        if identity == 1:
+            return {"is admin": True}
+        return {"is admin": False}
+
+
+    @jwt.expired_token_loader
+    def expired_token_callback(jwt_header, jwt_payload):
+        return (
+            jsonify({"message": "The token has expired", "error": "token expired"}),
+            401
+        )
+
+    @jwt.invalid_token_loader
+    def invalid_token_callback(error):
+        return (
+            jsonify({"message": "Signature varification failed", "error": "invalid token"}),
+            401
+        )
+    
+    @jwt.unauthorized_loader
+    def missing_token_callback(error):
+        return (
+            jsonify({"description": "Request does not contain an access token",
+                     "error": "authorisation required"})
+        )
 
     # Register blueprints for routes
     app.register_blueprint(ItemBlueprint)
@@ -47,6 +96,10 @@ def create_app(db_url=None):
     app.register_blueprint(TagBlueprint)
     app.register_blueprint(UserBlueprint)
     app.register_blueprint(DatabaseCheck)
+
+    @app.route("/")
+    def hello():
+        return {"message": "Hello, World!"}
 
     return app
 
